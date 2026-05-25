@@ -1,247 +1,143 @@
 """
-Main application entry point for Chemical-to-Audio Intelligent Monitoring System.
+app.py
 
-This is the primary entry point that launches the Streamlit dashboard.
+Streamlit dashboard for Chemical-to-Audio Intelligent Monitoring System.
+
+Architecture:
+  - Main thread: Streamlit UI (refreshes at DASHBOARD_REFRESH_MS)
+  - Background thread: Sensor → Feature → Classify → Map → Audio loop (20 Hz)
+  - SharedState: Thread-safe ring buffer for data exchange
 """
 
 import sys
 import os
-
-# Add src directory to path
+import time
+import threading
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 import streamlit as st
+import numpy as np
+
 from src.io.sensor_manager import SensorManager
-from src.io.simulator import ChemicalSimulator, PresetScenario
-from src.io.serial_reader import SerialReader, auto_detect_port
-from src.core.signal_tools import SignalProcessor
-from src.core.feature_extraction import FeatureExtractor, FeatureBuffer
-from src.core.classifier import StateClassifier, ReactionState
-from src.core.mapping import ParameterMapper, AudioMapping
+from src.core.feature_extraction import FeatureExtractor
+from src.core.classifier import StateClassifier
+from src.core.mapping import compute_audio_params
 from src.audio.tone_engine import ToneEngine
 from src.audio.voice_engine import VoiceEngine
-from src.ui.charts import ChartGenerator
-from src.ui.state_panels import StatePanelGenerator
-from src.config.settings import settings
+from src.ui.charts import plot_fft, plot_spectrogram, plot_radar, plot_time_series, plot_waveform
+from shared_state.ringbuffer import SharedState
+from src.config.settings import DASHBOARD_REFRESH_MS, SAMPLE_RATE
+
+
+def processing_loop(shared_state, sensor_manager, feature_extractor,
+                     classifier, tone_engine, voice_engine):
+    """Background thread: continuous sensor → audio pipeline."""
+    prev_state = "stable"
+    while True:
+        sensor_data = sensor_manager.read()
+        features = feature_extractor.update(sensor_data)
+        classification = classifier.classify(features)
+        audio_params = compute_audio_params(features, classification["state"])
+
+        # Update tone engine
+        tone_engine.update_params(audio_params)
+
+        # Voice announcements on state change
+        if classification["changed"]:
+            voice_engine.announce_transition(prev_state, classification["state"], features)
+            prev_state = classification["state"]
+
+        # Update shared state
+        shared_state.update(sensor_data, features, classification["state"])
+
+        # Update spectrogram from audio engine waveform
+        waveform = tone_engine.get_waveform()
+        shared_state.update_waveform(waveform)
+        shared_state.update_spectrogram(waveform)
+
+        time.sleep(1.0 / 20.0)  # 20 Hz processing rate
 
 
 def main():
-    """Main dashboard application."""
-    # Configure page
-    st.set_page_config(
-        page_title="Chemical-to-Audio Intelligent Monitoring System",
-        page_icon="🧪",
-        layout="wide",
-        initial_sidebar_state="expanded"
-    )
-    
-    # Apply custom CSS
-    st.markdown(
-        """
-        <style>
-        .stApp {
-            background-color: #0d1117;
-        }
-        .stTextInput > div > div > input,
-        .stSelectbox > div > div > select {
-            background-color: #1e1e1e;
-            color: white;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True
-    )
-    
-    # Initialize components in session state
-    if 'sensor_manager' not in st.session_state:
+    st.set_page_config(page_title="Chemical-to-Audio Monitoring", page_icon="🧪", layout="wide")
+
+    # Initialize components (once)
+    if "initialized" not in st.session_state:
+        st.session_state.shared_state = SharedState()
         st.session_state.sensor_manager = SensorManager()
-        st.session_state.signal_processor = SignalProcessor()
         st.session_state.feature_extractor = FeatureExtractor()
         st.session_state.classifier = StateClassifier()
-        st.session_state.mapper = ParameterMapper()
         st.session_state.tone_engine = ToneEngine()
         st.session_state.voice_engine = VoiceEngine()
-        st.session_state.chart_generator = ChartGenerator()
-        st.session_state.state_panel_generator = StatePanelGenerator()
-        st.session_state.feature_buffer = FeatureBuffer(max_length=300)
-        st.session_state.event_log = []
-        st.session_state.running = False
-        # Initialize with simulation by default
-        simulator = PresetScenario.stable_reaction()
-        st.session_state.sensor_manager.set_simulation_mode(simulator)
-        st.session_state.event_log.append("Initialized in simulation mode")
-    
-    sensor_manager = st.session_state.sensor_manager
-    signal_processor = st.session_state.signal_processor
-    feature_extractor = st.session_state.feature_extractor
-    classifier = st.session_state.classifier
-    mapper = st.session_state.mapper
-    tone_engine = st.session_state.tone_engine
-    voice_engine = st.session_state.voice_engine
-    chart_generator = st.session_state.chart_generator
-    state_panel_generator = st.session_state.state_panel_generator
-    feature_buffer = st.session_state.feature_buffer
-    event_log = st.session_state.event_log
-    running = st.session_state.running
-    
-    # Sidebar
-    st.sidebar.title("⚙️ Settings")
-    
-    mode = st.sidebar.radio("System Mode", ["Simulation", "Hardware"], index=0)
-    
-    if mode == "Simulation":
-        st.sidebar.info("Simulation Mode Active")
-        scenario = st.sidebar.selectbox(
-            "Scenario",
-            ["Stable Reaction", "Acid-Base Titration", "Exothermic Reaction", "Unstable Oscillation"]
+        st.session_state.initialized = True
+
+        # Start background processing thread
+        proc_thread = threading.Thread(
+            target=processing_loop,
+            args=(
+                st.session_state.shared_state,
+                st.session_state.sensor_manager,
+                st.session_state.feature_extractor,
+                st.session_state.classifier,
+                st.session_state.tone_engine,
+                st.session_state.voice_engine
+            ),
+            daemon=True
         )
-        if st.sidebar.button("Apply Scenario"):
-            simulator = get_scenario_simulator(scenario)
-            sensor_manager.set_simulation_mode(simulator)
-            st.session_state.sensor_manager = sensor_manager
-            event_log.append(f"Scenario changed: {scenario}")
-            st.session_state.event_log = event_log
-    else:
-        st.sidebar.info("Hardware Mode Active")
-        port = st.sidebar.text_input("Serial Port", value="/dev/ttyUSB0")
-        if st.sidebar.button("Connect"):
-            serial_reader = SerialReader(port=port)
-            if sensor_manager.set_hardware_mode(serial_reader):
-                st.session_state.sensor_manager = sensor_manager
-                event_log.append(f"Connected to {port}")
-                st.session_state.event_log = event_log
-                st.sidebar.success("Connected!")
-            else:
-                event_log.append(f"Failed to connect to {port}")
-                st.session_state.event_log = event_log
-                st.sidebar.error("Connection failed")
-        if st.sidebar.button("Auto-Detect"):
-            detected_port = auto_detect_port()
-            if detected_port:
-                st.sidebar.text(f"Detected: {detected_port}")
-            else:
-                st.sidebar.warning("No Arduino detected")
-    
-    audio_enabled = st.sidebar.checkbox("Enable Audio", value=True)
-    voice_enabled = st.sidebar.checkbox("Enable Voice", value=True)
-    refresh_rate = st.sidebar.slider("Refresh Rate (ms)", 50, 500, 100, 50)
-    
-    # Main area
+        proc_thread.start()
+
+        # Start audio
+        st.session_state.tone_engine.start()
+        st.session_state.voice_engine.start()
+
+    shared_state = st.session_state.shared_state
+    sensor_manager = st.session_state.sensor_manager
+    tone_engine = st.session_state.tone_engine
+
+    # Sidebar controls
+    st.sidebar.title("Controls")
+    if st.sidebar.button("Inject Disturbance"):
+        sensor_manager.inject_disturbance()
+
+    if st.sidebar.button("Reset Simulator"):
+        sensor_manager.reset()
+
+    # Main dashboard
     st.title("🧪 Chemical-to-Audio Intelligent Monitoring System")
-    
-    col1, col2, col3 = st.columns([2, 1, 1])
+
+    # Current status
+    current = shared_state.get_current()
+    state = current["state"]
+    features = current["features"]
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("State", state.upper())
+    col2.metric("pH", f"{features.get('ph_value', 0):.2f}")
+    col3.metric("Temperature", f"{features.get('temp_value', 0):.1f}°C")
+
+    # Charts row 1: Time series + Radar
+    history = shared_state.get_history()
+    col1, col2 = st.columns([2, 1])
     with col1:
-        current_mode = sensor_manager.get_mode()
-        mode_str = current_mode.value if current_mode else "Not configured"
-        st.caption(f"Mode: {mode_str}")
+        st.plotly_chart(plot_time_series(history["ph"], history["temp"], history["state"]), use_container_width=True)
     with col2:
-        connected = sensor_manager.is_connected()
-        status = "🟢 Connected" if connected else "🔴 Disconnected"
-        st.caption(status)
+        st.plotly_chart(plot_radar(features), use_container_width=True)
+
+    # Charts row 2: FFT + Spectrogram + Waveform
+    waveform = shared_state.get_waveform()
+    spectrogram = shared_state.get_spectrogram()
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.plotly_chart(plot_fft(waveform, SAMPLE_RATE), use_container_width=True)
+    with col2:
+        st.plotly_chart(plot_spectrogram(spectrogram), use_container_width=True)
     with col3:
-        if st.button("Start/Stop"):
-            st.session_state.running = not st.session_state.running
-            running = st.session_state.running
-            if running:
-                if not sensor_manager.is_connected():
-                    st.error("No sensor source connected!")
-                    st.session_state.running = False
-                else:
-                    if audio_enabled:
-                        tone_engine.start()
-                    if voice_enabled:
-                        if voice_engine.initialize():
-                            voice_engine.start()
-                    event_log.append("System started")
-                    st.session_state.event_log = event_log
-            else:
-                tone_engine.stop()
-                voice_engine.stop()
-                event_log.append("System stopped")
-                st.session_state.event_log = event_log
-    
-    # Update loop
-    if running:
-        reading = sensor_manager.read()
-        if reading:
-            ph_filtered = signal_processor.process(reading.ph)
-            temp_filtered = signal_processor.process(reading.temperature)
-            
-            features = feature_extractor.extract(
-                ph_filtered, temp_filtered, reading.timestamp,
-                reading.color_r, reading.color_g, reading.color_b
-            )
-            
-            classification = classifier.classify(features)
-            audio_mapping = mapper.map(features, classification.state)
-            
-            if audio_enabled:
-                tone_engine.update_mapping(audio_mapping)
-            
-            if voice_enabled:
-                voice_engine.announce_state(classification.state, classification.severity)
-            
-            feature_buffer.add_features(features, classification.state.value)
-            
-            if classification.triggers:
-                for trigger in classification.triggers:
-                    event_log.append(f"Trigger: {trigger}")
-            
-            # Render
-            state_panel_generator.render_main_status(classification.state, classification.confidence)
-            state_panel_generator.render_sensor_cards(features.ph, features.temperature, features.instability_score)
-            
-            ph_history = feature_buffer.get_ph_history()
-            temp_history = feature_buffer.get_temp_history()
-            timestamps = list(range(len(ph_history)))
-            
-            if len(ph_history) > 1:
-                col1, col2 = st.columns(2)
-                with col1:
-                    fig = chart_generator.create_combined_chart(timestamps, ph_history, temp_history)
-                    st.plotly_chart(fig, use_container_width=True)
-                with col2:
-                    volatility_history = feature_buffer.get_instability_history()
-                    fig = chart_generator.create_volatility_chart(timestamps, volatility_history)
-                    st.plotly_chart(fig, use_container_width=True)
-            
-            state_history = feature_buffer.get_state_history()
-            if len(state_history) > 1:
-                fig = chart_generator.create_state_timeline(timestamps, state_history)
-                st.plotly_chart(fig, use_container_width=True)
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                state_panel_generator.render_triggers_panel(classification.triggers)
-            with col2:
-                state_panel_generator.render_severity_meter(classification.severity)
-            
-            if audio_enabled:
-                state_panel_generator.render_audio_status(
-                    audio_mapping.pitch_center,
-                    audio_mapping.rhythm_density,
-                    audio_mapping.harmonic_consistency
-                )
-            
-            state_panel_generator.render_event_log(event_log[-10:])
-        else:
-            st.warning("No sensor data available")
-    else:
-        st.info("System stopped. Click 'Start/Stop' to begin monitoring.")
+        st.plotly_chart(plot_waveform(waveform), use_container_width=True)
 
-
-def get_scenario_simulator(scenario: str) -> ChemicalSimulator:
-    """Get simulator for selected scenario."""
-    if scenario == "Stable Reaction":
-        return PresetScenario.stable_reaction()
-    elif scenario == "Acid-Base Titration":
-        return PresetScenario.acid_base_titration()
-    elif scenario == "Exothermic Reaction":
-        return PresetScenario.exothermic_reaction()
-    elif scenario == "Unstable Oscillation":
-        return PresetScenario.unstable_oscillation()
-    else:
-        return PresetScenario.stable_reaction()
+    # Auto-refresh
+    time.sleep(DASHBOARD_REFRESH_MS / 1000.0)
+    st.rerun()
 
 
 if __name__ == "__main__":

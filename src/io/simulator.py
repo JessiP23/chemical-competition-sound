@@ -1,299 +1,105 @@
 """
-Real-time chemical reaction simulator.
+simulator.py
 
-Generates simulated pH, temperature, and color data for testing
-the system without physical hardware.
+6-phase chemical reaction simulation engine.
+Each phase models a realistic chemical scenario with continuous noise.
+
+Phases:
+  0 → Stable equilibrium (buffer solution, pH ~7, T ~25°C)
+  1 → Acid addition begins (pH drops 7→4, temperature rises)
+  2 → Reaction peak (pH oscillates around 4, high T, variance spikes)
+  3 → Neutralization (pH climbs 4→7, temperature stabilizes)
+  4 → Overshoot (pH exceeds 7→9, slight instability)
+  5 → Return to equilibrium (pH settles to 7, T drops)
 """
 
 import numpy as np
 import time
-import random
-from typing import Optional, Tuple
-from dataclasses import dataclass
-
-from src.config.settings import SimulationConfig
-
-
-@dataclass
-class SensorReading:
-    """Container for simulated sensor reading."""
-    ph: float
-    temperature: float
-    color_r: Optional[float] = None
-    color_g: Optional[float] = None
-    color_b: Optional[float] = None
-    timestamp: float = 0.0
+from src.config.settings import SCENARIO_PHASE_DURATIONS
 
 
 class ChemicalSimulator:
-    """
-    Real-time chemical reaction simulator.
-    
-    Simulates realistic chemical reaction behavior including:
-    - pH curves (acid-base reactions)
-    - Temperature changes (exothermic/endothermic)
-    - Instability spikes
-    - Reaction transitions
-    """
-    
-    def __init__(self, config: Optional[SimulationConfig] = None):
-        """
-        Initialize chemical simulator.
-        
-        Args:
-            config: Simulation configuration
-        """
-        self.config = config or SimulationConfig()
-        
-        # Current state
-        self.current_ph = self.config.BASE_PH
-        self.current_temp = self.config.BASE_TEMP
-        self.current_time = 0.0
-        
-        # Disturbance state
-        self.in_disturbance = False
-        self.disturbance_start = 0.0
-        self.disturbance_type = None
-        
-        # Reaction phase
-        self.phase = "stable"  # stable, rising, falling, oscillating
-        self.phase_start = 0.0
-        
-        # Color simulation
-        self.color_r = 100.0
-        self.color_g = 150.0
-        self.color_b = 200.0
-    
-    def update(self, dt: Optional[float] = None) -> SensorReading:
-        """
-        Update simulation by one time step.
-        
-        Args:
-            dt: Time step in seconds (uses config default if None)
-        
-        Returns:
-            SensorReading with current simulated values
-        """
-        if dt is None:
-            dt = self.config.TIME_STEP
-        
-        self.current_time += dt
-        
-        # Update pH
-        self._update_ph(dt)
-        
-        # Update temperature
-        self._update_temperature(dt)
-        
-        # Update color
-        self._update_color(dt)
-        
-        # Handle disturbances
-        self._handle_disturbances(dt)
-        
-        # Add noise
-        ph_noisy = self.current_ph + np.random.normal(0, self.config.PH_NOISE_STD)
-        temp_noisy = self.current_temp + np.random.normal(0, self.config.TEMP_NOISE_STD)
-        
-        # Clamp values to valid ranges
-        ph_noisy = max(0.0, min(14.0, ph_noisy))
-        temp_noisy = max(0.0, min(100.0, temp_noisy))
-        
-        return SensorReading(
-            ph=ph_noisy,
-            temperature=temp_noisy,
-            color_r=self.color_r,
-            color_g=self.color_g,
-            color_b=self.color_b,
-            timestamp=self.current_time
-        )
-    
-    def _update_ph(self, dt: float) -> None:
-        """Update pH based on reaction phase."""
-        if self.in_disturbance:
-            # During disturbance, pH changes rapidly
-            if self.disturbance_type == "acid_spike":
-                self.current_ph -= 2.0 * dt
-            elif self.disturbance_type == "base_spike":
-                self.current_ph += 2.0 * dt
-            elif self.disturbance_type == "oscillation":
-                self.current_ph += 3.0 * np.sin(self.current_time * 5.0) * dt
-        else:
-            # Normal reaction dynamics
-            if self.phase == "stable":
-                # Slow drift toward neutral
-                if self.current_ph > 7.0:
-                    self.current_ph -= 0.1 * dt
-                elif self.current_ph < 7.0:
-                    self.current_ph += 0.1 * dt
-            
-            elif self.phase == "rising":
-                # Gradual pH increase
-                self.current_ph += 0.3 * dt
-                if self.current_ph > 10.0:
-                    self.phase = "stable"
-            
-            elif self.phase == "falling":
-                # Gradual pH decrease
-                self.current_ph -= 0.3 * dt
-                if self.current_ph < 4.0:
-                    self.phase = "stable"
-            
-            elif self.phase == "oscillating":
-                # Oscillating pH
-                self.current_ph += 0.5 * np.sin(self.current_time * 2.0) * dt
-        
-        # Clamp pH
-        self.current_ph = max(0.0, min(14.0, self.current_ph))
-    
-    def _update_temperature(self, dt: float) -> None:
-        """Update temperature based on reaction state."""
-        if self.in_disturbance:
-            # During disturbance, temperature changes rapidly
-            if self.disturbance_type == "heat_spike":
-                self.current_temp += 5.0 * dt
-            elif self.disturbance_type == "cool_spike":
-                self.current_temp -= 5.0 * dt
-        else:
-            # Normal temperature dynamics
-            # Temperature tends toward ambient (25°C)
-            ambient = 25.0
-            diff = ambient - self.current_temp
-            self.current_temp += diff * 0.1 * dt
-            
-            # Add reaction heat based on pH deviation from neutral
-            ph_deviation = abs(self.current_ph - 7.0)
-            self.current_temp += ph_deviation * 0.05 * dt
-        
-        # Clamp temperature
-        self.current_temp = max(0.0, min(100.0, self.current_temp))
-    
-    def _update_color(self, dt: float) -> None:
-        """Update color based on pH (simulating indicator dye)."""
-        # Simulate pH indicator color change
-        # Acidic (low pH) → Red
-        # Neutral (pH 7) → Green
-        # Basic (high pH) → Blue
-        
-        if self.current_ph < 4.0:
-            # Acidic - red dominant
-            target_r, target_g, target_b = 255, 50, 50
-        elif self.current_ph < 7.0:
-            # Slightly acidic - orange/yellow
-            target_r, target_g, target_b = 255, 200, 50
-        elif self.current_ph < 10.0:
-            # Neutral to slightly basic - green
-            target_r, target_g, target_b = 50, 255, 100
-        else:
-            # Basic - blue
-            target_r, target_g, target_b = 50, 100, 255
-        
-        # Smooth transition
-        self.color_r += (target_r - self.color_r) * 0.1
-        self.color_g += (target_g - self.color_g) * 0.1
-        self.color_b += (target_b - self.color_b) * 0.1
-    
-    def _handle_disturbances(self, dt: float) -> None:
-        """Handle disturbance generation and expiration."""
-        # Check if disturbance should end
-        if self.in_disturbance:
-            if self.current_time - self.disturbance_start > self.config.DISTURBANCE_DURATION:
-                self.in_disturbance = False
-                self.disturbance_type = None
-        else:
-            # Randomly trigger disturbances
-            if random.random() < self.config.DISTURBANCE_PROBABILITY:
-                self._trigger_disturbance()
-    
-    def _trigger_disturbance(self) -> None:
-        """Trigger a random disturbance."""
-        self.in_disturbance = True
-        self.disturbance_start = self.current_time
-        
-        # Random disturbance type
-        disturbance_types = [
-            "acid_spike",
-            "base_spike",
-            "heat_spike",
-            "cool_spike",
-            "oscillation"
+    def __init__(self):
+        self.phase = 0
+        self.phase_start = time.time()
+        self.phase_durations = SCENARIO_PHASE_DURATIONS
+        self.t = 0.0  # internal time counter
+        self.dt = 0.05  # 50ms steps = 20Hz
+
+        # State
+        self.ph = 7.0
+        self.temperature = 25.0
+        self.color_r = 128
+        self.color_g = 128
+        self.color_b = 128
+
+        # Noise
+        self.rng = np.random.default_rng()
+
+    def _phase_targets(self):
+        """Define target values per phase."""
+        return [
+            # phase: (pH, temp, R, G, B)
+            (7.0,  25.0, 200, 200, 100),  # 0: stable
+            (4.0,  45.0, 220,  80,  60),  # 1: acid addition
+            (4.2,  55.0, 255,  40,  20),  # 2: reaction peak
+            (7.0,  40.0, 180, 160,  80),  # 3: neutralization
+            (9.0,  35.0,  80, 200, 180),  # 4: overshoot
+            (7.0,  26.0, 200, 200, 100),  # 5: equilibrium
         ]
-        self.disturbance_type = random.choice(disturbance_types)
-    
-    def trigger_disturbance(self, disturbance_type: str) -> None:
-        """
-        Manually trigger a specific disturbance.
-        
-        Args:
-            disturbance_type: Type of disturbance to trigger
-        """
-        self.in_disturbance = True
-        self.disturbance_start = self.current_time
-        self.disturbance_type = disturbance_type
-    
-    def set_phase(self, phase: str) -> None:
-        """
-        Set reaction phase.
-        
-        Args:
-            phase: Phase name (stable, rising, falling, oscillating)
-        """
-        self.phase = phase
-        self.phase_start = self.current_time
-    
-    def reset(self) -> None:
-        """Reset simulator to initial state."""
-        self.current_ph = self.config.BASE_PH
-        self.current_temp = self.config.BASE_TEMP
-        self.current_time = 0.0
-        self.in_disturbance = False
-        self.disturbance_type = None
-        self.phase = "stable"
-        self.color_r = 100.0
-        self.color_g = 150.0
-        self.color_b = 200.0
-    
-    def get_state(self) -> dict:
-        """Get current simulator state."""
+
+    def _noise_scale(self):
+        """Noise magnitude per phase — higher during instability."""
+        scales = [0.02, 0.08, 0.25, 0.12, 0.10, 0.03]
+        return scales[self.phase]
+
+    def tick(self) -> dict:
+        """Advance simulation by one step. Returns current sensor readings."""
+        now = time.time()
+        elapsed = now - self.phase_start
+
+        # Advance phase
+        if elapsed > self.phase_durations[self.phase]:
+            self.phase = (self.phase + 1) % len(self.phase_durations)
+            self.phase_start = now
+
+        targets = self._phase_targets()[self.phase]
+        ph_target, temp_target, r_target, g_target, b_target = targets
+
+        # Smooth approach to target with noise
+        noise = self.rng.normal(0, self._noise_scale())
+        alpha = 0.05  # smoothing factor
+
+        self.ph = self.ph + alpha * (ph_target - self.ph) + noise
+        self.ph = float(np.clip(self.ph, 0.0, 14.0))
+
+        self.temperature = self.temperature + alpha * (temp_target - self.temperature) + \
+                           self.rng.normal(0, self._noise_scale() * 0.3)
+        self.temperature = float(np.clip(self.temperature, 15.0, 100.0))
+
+        self.color_r = int(np.clip(self.color_r + alpha * (r_target - self.color_r), 0, 255))
+        self.color_g = int(np.clip(self.color_g + alpha * (g_target - self.color_g), 0, 255))
+        self.color_b = int(np.clip(self.color_b + alpha * (b_target - self.color_b), 0, 255))
+
+        self.t += self.dt
+
         return {
-            "ph": self.current_ph,
-            "temperature": self.current_temp,
+            "timestamp": now,
+            "ph": self.ph,
+            "temperature": self.temperature,
+            "color_r": self.color_r,
+            "color_g": self.color_g,
+            "color_b": self.color_b,
             "phase": self.phase,
-            "in_disturbance": self.in_disturbance,
-            "disturbance_type": self.disturbance_type,
-            "time": self.current_time
+            "phase_name": ["Stable", "Acid Addition", "Reaction Peak",
+                           "Neutralization", "Overshoot", "Equilibrium"][self.phase],
         }
 
+    def reset(self):
+        self.__init__()
 
-class PresetScenario:
-    """Predefined simulation scenarios for demo purposes."""
-    
-    @staticmethod
-    def stable_reaction() -> ChemicalSimulator:
-        """Create simulator in stable reaction mode."""
-        sim = ChemicalSimulator()
-        sim.set_phase("stable")
-        return sim
-    
-    @staticmethod
-    def acid_base_titration() -> ChemicalSimulator:
-        """Create simulator simulating acid-base titration."""
-        sim = ChemicalSimulator()
-        sim.current_ph = 2.0  # Start acidic
-        sim.set_phase("rising")
-        return sim
-    
-    @staticmethod
-    def exothermic_reaction() -> ChemicalSimulator:
-        """Create simulator simulating exothermic reaction."""
-        sim = ChemicalSimulator()
-        sim.current_temp = 20.0
-        sim.trigger_disturbance("heat_spike")
-        return sim
-    
-    @staticmethod
-    def unstable_oscillation() -> ChemicalSimulator:
-        """Create simulator with unstable oscillating behavior."""
-        sim = ChemicalSimulator()
-        sim.set_phase("oscillating")
-        return sim
+    def inject_disturbance(self, magnitude=0.5):
+        """Manually inject a spike — for live demo."""
+        self.ph += self.rng.uniform(-magnitude * 2, magnitude * 2)
+        self.temperature += self.rng.uniform(0, magnitude * 10)
+        self.ph = float(np.clip(self.ph, 0.0, 14.0))

@@ -1,312 +1,120 @@
 """
-Parameter mapping for sonification.
+mapping.py
 
-Maps sensor features and reaction states to audio synthesis parameters
-using research-driven sonification principles.
+Parameter Mapping Sonification (PMS) — Hermann, Hunt & Neuhoff, Chapter 15.
+
+Maps 3 data channels to independent audio parameter spaces:
+  Channel 1 (pH)         → pitch, harmonic complexity, vibrato
+  Channel 2 (temperature) → rhythm density, LFO rate, reverb
+  Channel 3 (color)      → timbre brightness, stereo pan, envelope
+
+All mappings use smooth interpolation to prevent audio discontinuities.
 """
 
 import numpy as np
-from typing import Tuple, Dict
-from dataclasses import dataclass
-
-from src.core.feature_extraction import SensorFeatures
-from src.core.classifier import ReactionState
 from src.config.settings import (
-    SonificationMappings,
-    AudioParameters,
-    SensorRanges
+    PH_FREQ_BASE, PH_FREQ_EXPONENT,
+    TEMP_BPM_MIN, TEMP_BPM_MAX,
+    PH_MIN, PH_MAX, TEMP_MIN, TEMP_MAX
 )
 
 
-@dataclass
-class AudioMapping:
-    """Audio synthesis parameters derived from sensor data."""
-    # Pitch parameters
-    pitch_center: float  # Hz
-    pitch_glide: float  # semitones/second
-    
-    # Rhythm parameters
-    rhythm_density: float  # events/second
-    
-    # Timbre parameters
-    harmonic_consistency: float  # 0-1
-    dissonance: float  # 0-1
-    distortion: float  # 0-1
-    noise_gain: float  # 0-1
-    
-    # Dynamics
-    overall_gain: float  # 0-1
-    
-    # Special events
-    trigger_percussive: bool
-    percussive_gain: float
-
-
-class ParameterMapper:
+def ph_to_frequency(ph: float) -> float:
     """
-    Maps sensor features to audio synthesis parameters.
-    
-    Based on research in:
-    - Data sonification theory
-    - Psychoacoustic perception
-    - Auditory display principles
+    Exponential mapping: pH → Hz
+    Grounded in equal-temperament: each pH unit = one semitone.
+    pH 7 (neutral) = 528 Hz (perceived as calm/stable).
     """
-    
-    def __init__(
-        self,
-        mappings: SonificationMappings = None,
-        audio_params: AudioParameters = None,
-        sensor_ranges: SensorRanges = None
-    ):
-        """
-        Initialize parameter mapper.
-        
-        Args:
-            mappings: Sonification mapping rules
-            audio_params: Audio parameter constraints
-            sensor_ranges: Physical sensor ranges
-        """
-        self.mappings = mappings or SonificationMappings()
-        self.audio_params = audio_params or AudioParameters()
-        self.sensor_ranges = sensor_ranges or SensorRanges()
-    
-    def map(
-        self,
-        features: SensorFeatures,
-        state: ReactionState
-    ) -> AudioMapping:
-        """
-        Map sensor features and state to audio parameters.
-        
-        Args:
-            features: Extracted sensor features
-            state: Current reaction state
-        
-        Returns:
-            AudioMapping with all synthesis parameters
-        """
-        # Map pH to pitch center
-        pitch_center = self._map_ph_to_pitch(features.ph)
-        
-        # Map pH rate to pitch glide
-        pitch_glide = self._map_ph_rate_to_glide(features.ph_rate)
-        
-        # Map temperature to rhythm density
-        rhythm_density = self._map_temp_to_rhythm(features.temperature)
-        
-        # Map stability to harmonic consistency
-        harmonic_consistency = self._map_stability_to_harmonic(
-            features.instability_score
-        )
-        
-        # Map instability to dissonance
-        dissonance = self._map_instability_to_dissonance(
-            features.instability_score
-        )
-        
-        # Map state to distortion
-        distortion = self._map_state_to_distortion(state)
-        
-        # Map state to noise gain
-        noise_gain = self._map_state_to_noise(state)
-        
-        # Map overall gain based on state
-        overall_gain = self._map_state_to_gain(state)
-        
-        # Detect percussive trigger
-        trigger_percussive, percussive_gain = self._detect_percussive_trigger(
-            features.ph_spike,
-            features.temp_spike,
-            features.transition_intensity
-        )
-        
-        return AudioMapping(
-            pitch_center=pitch_center,
-            pitch_glide=pitch_glide,
-            rhythm_density=rhythm_density,
-            harmonic_consistency=harmonic_consistency,
-            dissonance=dissonance,
-            distortion=distortion,
-            noise_gain=noise_gain,
-            overall_gain=overall_gain,
-            trigger_percussive=trigger_percussive,
-            percussive_gain=percussive_gain
-        )
-    
-    def _map_ph_to_pitch(self, ph: float) -> float:
-        """
-        Map pH value to pitch center.
-        
-        Rationale: pH represents the fundamental chemical property.
-        Lower pitch for acidic, higher pitch for basic.
-        Neutral pH (7.0) maps to neutral pitch (A4 = 440Hz).
-        
-        Mapping: 0-14 pH → 110-880 Hz (A2 to A5)
-        """
-        # Normalize pH to 0-1 range
-        norm_ph = (ph - self.sensor_ranges.PH_MIN) / (
-            self.sensor_ranges.PH_MAX - self.sensor_ranges.PH_MIN
-        )
-        norm_ph = max(0.0, min(1.0, norm_ph))
-        
-        # Map to pitch range
-        pitch_min, pitch_max = self.mappings.PH_TO_PITCH
-        pitch = pitch_min + norm_ph * (pitch_max - pitch_min)
-        
-        return pitch
-    
-    def _map_ph_rate_to_glide(self, ph_rate: float) -> float:
-        """
-        Map pH rate of change to pitch glide.
-        
-        Rationale: Rate of change indicates reaction dynamics.
-        Faster changes produce more dramatic glides.
-        
-        Mapping: Rate → 0-2 semitones/second
-        """
-        # Normalize rate (assume max rate of 0.5 pH/s)
-        norm_rate = min(abs(ph_rate) / 0.5, 1.0)
-        
-        # Map to glide range
-        glide_min, glide_max = self.mappings.PH_RATE_TO_GLIDE
-        glide = glide_min + norm_rate * (glide_max - glide_min)
-        
-        # Apply direction
-        if ph_rate < 0:
-            glide = -glide
-        
-        return glide
-    
-    def _map_temp_to_rhythm(self, temperature: float) -> float:
-        """
-        Map temperature to rhythm density.
-        
-        Rationale: Temperature correlates with reaction energy.
-        Higher temperature = more rhythmic activity.
-        
-        Mapping: 0-100°C → 0.5-8.0 events/second
-        """
-        # Normalize temperature
-        norm_temp = (temperature - self.sensor_ranges.TEMP_MIN) / (
-            self.sensor_ranges.TEMP_MAX - self.sensor_ranges.TEMP_MIN
-        )
-        norm_temp = max(0.0, min(1.0, norm_temp))
-        
-        # Map to rhythm range
-        rhythm_min, rhythm_max = self.mappings.TEMP_TO_RHYTHM
-        rhythm = rhythm_min + norm_temp * (rhythm_max - rhythm_min)
-        
-        return rhythm
-    
-    def _map_stability_to_harmonic(self, instability: float) -> float:
-        """
-        Map instability score to harmonic consistency.
-        
-        Rationale: Stable reactions produce consonant harmonies.
-        Instability introduces dissonance.
-        
-        Mapping: 0-1 instability → 1-0 harmonic consistency
-        """
-        harmonic_min, harmonic_max = self.mappings.STABILITY_TO_HARMONIC
-        harmonic = harmonic_max - instability * (harmonic_max - harmonic_min)
-        return max(harmonic_min, min(harmonic_max, harmonic))
-    
-    def _map_instability_to_dissonance(self, instability: float) -> float:
-        """
-        Map instability score to dissonance level.
-        
-        Rationale: Direct mapping of instability to perceptual tension.
-        
-        Mapping: 0-1 instability → 0-1 dissonance
-        """
-        dissonance_min, dissonance_max = self.mappings.INSTABILITY_TO_DISSONANCE
-        dissonance = dissonance_min + instability * (dissonance_max - dissonance_min)
-        return max(dissonance_min, min(dissonance_max, dissonance))
-    
-    def _map_state_to_distortion(self, state: ReactionState) -> float:
-        """
-        Map reaction state to distortion level.
-        
-        Rationale: Critical conditions require perceptual urgency.
-        Distortion creates alert-like quality.
-        
-        Mapping: State → 0-1 distortion
-        """
-        state_distortion = {
-            ReactionState.STABLE: 0.0,
-            ReactionState.TRANSITIONAL: 0.1,
-            ReactionState.CRITICAL: self.mappings.CRITICAL_DISTORTION,
-            ReactionState.CHAOTIC: 0.9
-        }
-        
-        return state_distortion.get(state, 0.0)
-    
-    def _map_state_to_noise(self, state: ReactionState) -> float:
-        """
-        Map reaction state to noise layer gain.
-        
-        Rationale: Chaos represented through broadband noise.
-        
-        Mapping: State → 0-1 noise gain
-        """
-        state_noise = {
-            ReactionState.STABLE: 0.0,
-            ReactionState.TRANSITIONAL: 0.1,
-            ReactionState.CRITICAL: 0.3,
-            ReactionState.CHAOTIC: self.mappings.CHAOTIC_NOISE_GAIN
-        }
-        
-        return state_noise.get(state, 0.0)
-    
-    def _map_state_to_gain(self, state: ReactionState) -> float:
-        """
-        Map reaction state to overall gain.
-        
-        Rationale: Critical states should be more prominent.
-        """
-        state_gain = {
-            ReactionState.STABLE: 0.5,
-            ReactionState.TRANSITIONAL: 0.6,
-            ReactionState.CRITICAL: 0.8,
-            ReactionState.CHAOTIC: 0.7
-        }
-        
-        return state_gain.get(state, 0.5)
-    
-    def _detect_percussive_trigger(
-        self,
-        ph_spike: bool,
-        temp_spike: bool,
-        transition_intensity: float
-    ) -> Tuple[bool, float]:
-        """
-        Detect if percussive event should be triggered.
-        
-        Rationale: Abrupt changes should be marked percussively
-        to draw attention to anomalies.
-        """
-        trigger = ph_spike or temp_spike or transition_intensity > 0.7
-        
-        if trigger:
-            gain = self.mappings.PERCUSSIVE_GAIN
-            if transition_intensity > 0.7:
-                gain = min(1.0, gain + transition_intensity * 0.2)
-            return True, gain
-        
-        return False, 0.0
+    # Center at pH 7 = 528 Hz, ±1 semitone per pH unit
+    semitones_from_neutral = (ph - 7.0)
+    freq = 528.0 * (2 ** (semitones_from_neutral / 12.0))
+    return float(np.clip(freq, 80.0, 2000.0))
 
 
-def normalize_audio_parameter(value: float, min_val: float, max_val: float) -> float:
-    """Clamp audio parameter to valid range."""
-    return max(min_val, min(max_val, value))
+def state_to_harmonics(state: str) -> list:
+    """
+    Returns list of harmonic multipliers based on state.
+    Consonance = stable perception; dissonance = instability.
+    """
+    return {
+        "stable":       [1.0, 1.5, 2.0],               # root + fifth + octave
+        "transitional": [1.0, 1.5, 1.778],              # adds minor 7th
+        "critical":     [1.0, 1.414, 1.778, 2.0],       # tritone = max dissonance
+        "chaotic":      [1.0, 1.333, 1.414, 1.587, 2.0], # dense dissonant cluster
+    }.get(state, [1.0])
 
 
-def get_state_audio_description(state: ReactionState) -> str:
-    """Get audio description for state."""
-    descriptions = {
-        ReactionState.STABLE: "Calm, harmonic tones with steady rhythm",
-        ReactionState.TRANSITIONAL: "Evolving pitch with moderate rhythmic activity",
-        ReactionState.CRITICAL: "Tense, dissonant with distortion and urgency",
-        ReactionState.CHAOTIC: "Unpredictable, noisy with extreme variation"
+def temp_to_rhythm_density(temp: float) -> float:
+    """Temperature → beats per second (rhythm density)."""
+    t_norm = (temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)
+    return TEMP_BPM_MIN + t_norm * (TEMP_BPM_MAX - TEMP_BPM_MIN)
+
+
+def temp_to_lfo_rate(temp: float) -> float:
+    """Temperature → LFO modulation rate (0.1 to 8 Hz)."""
+    t_norm = (temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)
+    return 0.1 + t_norm * 7.9
+
+
+def luminance_to_brightness(luminance: float) -> float:
+    """
+    Color luminance → timbre brightness (filter cutoff multiplier).
+    Higher luminance = brighter, more harmonics passed.
+    """
+    return 0.3 + luminance * 0.7  # 0.3 to 1.0
+
+
+def luminance_to_pan(luminance: float) -> float:
+    """Color luminance → stereo pan (-1 left, 0 center, +1 right)."""
+    return (luminance - 0.5) * 2.0  # re-center around 0
+
+
+def volatility_to_noise_mix(volatility: float) -> float:
+    """Higher volatility = more noise mixed into the tone."""
+    return min(1.0, volatility ** 0.5)  # square root for perceptual linearity
+
+
+def dpH_to_vibrato(dpH_dt: float) -> tuple:
+    """
+    Rate of pH change → vibrato (pitch modulation).
+    Returns (vibrato_rate_hz, vibrato_depth_semitones).
+    """
+    magnitude = abs(dpH_dt)
+    rate = np.clip(magnitude * 10.0, 0.0, 12.0)   # 0–12 Hz
+    depth = np.clip(magnitude * 5.0, 0.0, 2.0)    # 0–2 semitones
+    return float(rate), float(depth)
+
+
+def compute_audio_params(features: dict, state: str) -> dict:
+    """
+    Master mapping function.
+    Takes feature dict + state string.
+    Returns complete audio parameter dict.
+    """
+    ph = features["ph_value"]
+    temp = features["temp_value"]
+    lum = features["luminance"]
+    vol = features["volatility"]
+    dpH = features["dpH_dt"]
+
+    freq = ph_to_frequency(ph)
+    harmonics = state_to_harmonics(state)
+    rhythm = temp_to_rhythm_density(temp)
+    lfo = temp_to_lfo_rate(temp)
+    brightness = luminance_to_brightness(lum)
+    pan = luminance_to_pan(lum)
+    noise_mix = volatility_to_noise_mix(vol)
+    vib_rate, vib_depth = dpH_to_vibrato(dpH)
+
+    return {
+        "fundamental_hz": freq,
+        "harmonics": harmonics,
+        "rhythm_bps": rhythm,
+        "lfo_rate_hz": lfo,
+        "brightness": brightness,
+        "pan": pan,
+        "noise_mix": noise_mix,
+        "vibrato_rate": vib_rate,
+        "vibrato_depth": vib_depth,
+        "state": state,
     }
-    return descriptions.get(state, "Unknown")

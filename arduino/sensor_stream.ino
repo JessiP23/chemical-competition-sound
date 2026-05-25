@@ -1,15 +1,16 @@
 /*
- * Chemical-to-Audio Intelligent Monitoring System
- * Arduino Sensor Stream Firmware
- * 
- * Reads pH, temperature, and optional color sensors
- * and streams data via serial for processing by Python application.
- * 
+ * sensor_stream.ino
+ *
+ * Arduino firmware for Chemical-to-Audio Intelligent Monitoring System.
+ * Reads pH, temperature, and color sensors; streams via serial (CSV).
+ *
  * Hardware:
- * - Arduino Uno
- * - DFRobot Gravity Analog pH Sensor (Analog A0)
- * - DS18B20 Waterproof Temperature Sensor (Digital D2)
- * - TCS34725 RGB Color Sensor (I2C - optional, requires Arduino Mega)
+ *   - pH sensor (analog A0)
+ *   - DS18B20 temperature sensor (digital D2)
+ *   - TCS34725 RGB color sensor (I2C - optional)
+ *
+ * Output format (CSV): pH,temperature,colorR,colorG,colorB
+ * Update rate: 10 Hz (100ms)
  */
 
 #include <OneWire.h>
@@ -19,128 +20,108 @@
 #define PH_PIN A0
 #define TEMP_PIN 2
 
-// pH sensor calibration
-#define PH_OFFSET 0.0  // Adjust after calibration
+// pH calibration offset (adjust after calibration)
+#define PH_OFFSET 0.0
 
-// Temperature sensor setup
+// Temperature sensor
 OneWire oneWire(TEMP_PIN);
 DallasTemperature tempSensor(&oneWire);
 
 // Timing
-unsigned long lastUpdateTime = 0;
-const unsigned long updateInterval = 100;  // 10 Hz update rate
+unsigned long lastUpdate = 0;
+const unsigned long UPDATE_INTERVAL = 100;  // 10 Hz
 
-// Smoothing
-const int smoothingWindow = 5;
-float phReadings[smoothingWindow];
+// pH smoothing window
+const int SMOOTH_WINDOW = 5;
+float phBuffer[SMOOTH_WINDOW];
 int phIndex = 0;
 
 void setup() {
   Serial.begin(115200);
   
-  // Initialize temperature sensor
   tempSensor.begin();
-  tempSensor.setResolution(10);  // 10-bit resolution (0.25°C)
+  tempSensor.setResolution(10);  // 0.25°C resolution
   
-  // Initialize pH readings array
-  for (int i = 0; i < smoothingWindow; i++) {
-    phReadings[i] = 7.0;
+  // Initialize pH buffer
+  for (int i = 0; i < SMOOTH_WINDOW; i++) {
+    phBuffer[i] = 7.0;
   }
   
-  // Allow sensors to stabilize
-  delay(2000);
-  
-  Serial.println("Chemical Sensor Stream Initialized");
+  delay(2000);  // Sensor stabilization
+  Serial.println("SENSOR_STREAM_READY");
 }
 
 void loop() {
-  unsigned long currentTime = millis();
+  unsigned long now = millis();
   
-  if (currentTime - lastUpdateTime >= updateInterval) {
-    lastUpdateTime = currentTime;
+  if (now - lastUpdate >= UPDATE_INTERVAL) {
+    lastUpdate = now;
     
-    // Read sensors
     float ph = readPH();
-    float temperature = readTemperature();
+    float temp = readTemperature();
     
-    // Optional: Read color sensor (if connected)
-    // float colorR = readColorR();
-    // float colorG = readColorG();
-    // float colorB = readColorB();
+    // Color sensors (optional - return 0 if not connected)
+    float r = 0, g = 0, b = 0;
+    // readColor(&r, &g, &b);  // Uncomment if TCS34725 is connected
     
-    // Stream data via serial
-    // Format: pH,temperature,colorR,colorG,colorB
-    // Color values are optional (0 if not available)
+    // CSV output
     Serial.print(ph, 2);
     Serial.print(",");
-    Serial.print(temperature, 2);
+    Serial.print(temp, 2);
     Serial.print(",");
-    Serial.print("0");  // colorR placeholder
+    Serial.print(r, 0);
     Serial.print(",");
-    Serial.print("0");  // colorG placeholder
+    Serial.print(g, 0);
     Serial.print(",");
-    Serial.println("0");  // colorB placeholder
+    Serial.println(b, 0);
   }
 }
 
 float readPH() {
-  // Read analog pH sensor
-  int rawValue = analogRead(PH_PIN);
+  int raw = analogRead(PH_PIN);
+  float voltage = raw * (5.0 / 1023.0);
   
-  // Convert to voltage (0-5V)
-  float voltage = rawValue * (5.0 / 1023.0);
-  
-  // Convert voltage to pH (DFRobot pH sensor formula)
-  // pH = 7.0 - (voltage - 2.5) / 0.18  (approximate)
-  // Adjust based on your specific sensor calibration
+  // DFRobot pH sensor approximation
   float ph = 7.0 - (voltage - 2.5) / 0.18 + PH_OFFSET;
   
-  // Apply smoothing
-  phReadings[phIndex] = ph;
-  phIndex = (phIndex + 1) % smoothingWindow;
+  // Moving average smoothing
+  phBuffer[phIndex] = ph;
+  phIndex = (phIndex + 1) % SMOOTH_WINDOW;
   
-  // Calculate moving average
   float sum = 0.0;
-  for (int i = 0; i < smoothingWindow; i++) {
-    sum += phReadings[i];
+  for (int i = 0; i < SMOOTH_WINDOW; i++) {
+    sum += phBuffer[i];
   }
-  float smoothedPH = sum / smoothingWindow;
+  float smoothed = sum / SMOOTH_WINDOW;
   
-  // Clamp to valid range
-  if (smoothedPH < 0.0) smoothedPH = 0.0;
-  if (smoothedPH > 14.0) smoothedPH = 14.0;
+  // Clamp
+  if (smoothed < 0.0) smoothed = 0.0;
+  if (smoothed > 14.0) smoothed = 14.0;
   
-  return smoothedPH;
+  return smoothed;
 }
 
 float readTemperature() {
-  // Request temperature from DS18B20
   tempSensor.requestTemperatures();
-  
-  // Read temperature in Celsius
   float tempC = tempSensor.getTempCByIndex(0);
   
-  // Handle sensor error
   if (tempC == -127.0) {
-    return 25.0;  // Return default value on error
+    return 25.0;  // Fallback on error
   }
-  
   return tempC;
 }
 
 /*
- * Optional color sensor functions
- * Requires TCS34725 library and I2C pins (SDA/SCL)
- * Only works on Arduino Mega or boards with dedicated I2C pins
+ * Optional TCS34725 color sensor support.
+ * Requires Adafruit_TCS34725 library.
  */
-
 /*
 #include <Wire.h>
 #include <Adafruit_TCS34725.h>
 
 Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
 
-void initColorSensor() {
+void initColor() {
   if (tcs.begin()) {
     Serial.println("Color sensor initialized");
   } else {
@@ -148,21 +129,11 @@ void initColorSensor() {
   }
 }
 
-float readColorR() {
-  uint16_t r, g, b, c;
-  tcs.getRawData(&r, &g, &b, &c);
-  return (float)r;
-}
-
-float readColorG() {
-  uint16_t r, g, b, c;
-  tcs.getRawData(&r, &g, &b, &c);
-  return (float)g;
-}
-
-float readColorB() {
-  uint16_t r, g, b, c;
-  tcs.getRawData(&r, &g, &b, &c);
-  return (float)b;
+void readColor(float *r, float *g, float *b) {
+  uint16_t red, green, blue, clear;
+  tcs.getRawData(&red, &green, &blue, &clear);
+  *r = (float)red;
+  *g = (float)green;
+  *b = (float)blue;
 }
 */
