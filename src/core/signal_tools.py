@@ -122,7 +122,7 @@ class SignalProcessor:
     def __init__(
         self,
         ma_window: int = 10,
-        lpf_cutoff: float = 5.0,
+        lpf_cutoff: float = 2.0,
         lpf_order: int = 4,
         sample_rate: float = 10.0,
         smoothing_alpha: float = 0.3,

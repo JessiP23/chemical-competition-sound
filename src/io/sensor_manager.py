@@ -17,7 +17,7 @@ class SensorSource(ABC):
     """Abstract base class for sensor data sources."""
     
     @abstractmethod
-    def read(self) -> Optional[SensorReading]:
+    def read(self) -> Optional['SensorReading']:
         """Read sensor data."""
         pass
     
@@ -38,7 +38,7 @@ class SimulatorSource(SensorSource):
     def __init__(self, simulator: ChemicalSimulator):
         self.simulator = simulator
     
-    def read(self) -> Optional[SensorReading]:
+    def read(self) -> Optional['SensorReading']:
         """Read simulated sensor data."""
         reading = self.simulator.update()
         return SensorReading(
@@ -69,7 +69,7 @@ class HardwareSource(SensorSource):
     def __init__(self, serial_reader: SerialReader):
         self.serial_reader = serial_reader
     
-    def read(self) -> Optional[SensorReading]:
+    def read(self) -> Optional['SensorReading']:
         """Read hardware sensor data."""
         reading = self.serial_reader.read()
         if reading:
@@ -148,7 +148,7 @@ class SensorManager:
         self.mode = SystemMode.HARDWARE
         return True
     
-    def read(self) -> Optional[SensorReading]:
+    def read(self) -> Optional['SensorReading']:
         """
         Read sensor data from current source.
         
