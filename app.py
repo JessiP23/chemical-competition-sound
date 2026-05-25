@@ -52,23 +52,37 @@ def main():
         unsafe_allow_html=True
     )
     
-    # Initialize components
-    sensor_manager = SensorManager()
-    signal_processor = SignalProcessor()
-    feature_extractor = FeatureExtractor()
-    classifier = StateClassifier()
-    mapper = ParameterMapper()
-    tone_engine = ToneEngine()
-    voice_engine = VoiceEngine()
-    chart_generator = ChartGenerator()
-    state_panel_generator = StatePanelGenerator()
+    # Initialize components in session state
+    if 'sensor_manager' not in st.session_state:
+        st.session_state.sensor_manager = SensorManager()
+        st.session_state.signal_processor = SignalProcessor()
+        st.session_state.feature_extractor = FeatureExtractor()
+        st.session_state.classifier = StateClassifier()
+        st.session_state.mapper = ParameterMapper()
+        st.session_state.tone_engine = ToneEngine()
+        st.session_state.voice_engine = VoiceEngine()
+        st.session_state.chart_generator = ChartGenerator()
+        st.session_state.state_panel_generator = StatePanelGenerator()
+        st.session_state.feature_buffer = FeatureBuffer(max_length=300)
+        st.session_state.event_log = []
+        st.session_state.running = False
+        # Initialize with simulation by default
+        simulator = PresetScenario.stable_reaction()
+        st.session_state.sensor_manager.set_simulation_mode(simulator)
+        st.session_state.event_log.append("Initialized in simulation mode")
     
-    feature_buffer = FeatureBuffer(max_length=300)
-    event_log = []
-    
-    running = False
-    audio_enabled = True
-    voice_enabled = True
+    sensor_manager = st.session_state.sensor_manager
+    signal_processor = st.session_state.signal_processor
+    feature_extractor = st.session_state.feature_extractor
+    classifier = st.session_state.classifier
+    mapper = st.session_state.mapper
+    tone_engine = st.session_state.tone_engine
+    voice_engine = st.session_state.voice_engine
+    chart_generator = st.session_state.chart_generator
+    state_panel_generator = st.session_state.state_panel_generator
+    feature_buffer = st.session_state.feature_buffer
+    event_log = st.session_state.event_log
+    running = st.session_state.running
     
     # Sidebar
     st.sidebar.title("⚙️ Settings")
@@ -84,17 +98,22 @@ def main():
         if st.sidebar.button("Apply Scenario"):
             simulator = get_scenario_simulator(scenario)
             sensor_manager.set_simulation_mode(simulator)
+            st.session_state.sensor_manager = sensor_manager
             event_log.append(f"Scenario changed: {scenario}")
+            st.session_state.event_log = event_log
     else:
         st.sidebar.info("Hardware Mode Active")
         port = st.sidebar.text_input("Serial Port", value="/dev/ttyUSB0")
         if st.sidebar.button("Connect"):
             serial_reader = SerialReader(port=port)
             if sensor_manager.set_hardware_mode(serial_reader):
+                st.session_state.sensor_manager = sensor_manager
                 event_log.append(f"Connected to {port}")
+                st.session_state.event_log = event_log
                 st.sidebar.success("Connected!")
             else:
                 event_log.append(f"Failed to connect to {port}")
+                st.session_state.event_log = event_log
                 st.sidebar.error("Connection failed")
         if st.sidebar.button("Auto-Detect"):
             detected_port = auto_detect_port()
@@ -121,11 +140,12 @@ def main():
         st.caption(status)
     with col3:
         if st.button("Start/Stop"):
-            running = not running
+            st.session_state.running = not st.session_state.running
+            running = st.session_state.running
             if running:
                 if not sensor_manager.is_connected():
                     st.error("No sensor source connected!")
-                    running = False
+                    st.session_state.running = False
                 else:
                     if audio_enabled:
                         tone_engine.start()
@@ -133,16 +153,12 @@ def main():
                         if voice_engine.initialize():
                             voice_engine.start()
                     event_log.append("System started")
+                    st.session_state.event_log = event_log
             else:
                 tone_engine.stop()
                 voice_engine.stop()
                 event_log.append("System stopped")
-    
-    # Initialize with simulation
-    if not sensor_manager.is_connected():
-        simulator = PresetScenario.stable_reaction()
-        sensor_manager.set_simulation_mode(simulator)
-        event_log.append("Initialized in simulation mode")
+                st.session_state.event_log = event_log
     
     # Update loop
     if running:
