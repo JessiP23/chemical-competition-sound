@@ -4,7 +4,7 @@ MODE = "simulation"  # "simulation" | "hardware"
 
 # Serial port (hardware mode only)
 SERIAL_PORT = "/dev/ttyUSB0"  # Linux: /dev/ttyUSB0 | Windows: COM3 | Mac: /dev/cu.usbmodem*
-BAUD_RATE = 9600
+BAUD_RATE = 115200
 
 # Sensor ranges
 PH_MIN = 0.0

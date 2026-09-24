@@ -1,144 +1,74 @@
-"""
-app.py
-
-Streamlit dashboard for Chemical-to-Audio Intelligent Monitoring System.
-
-Architecture:
-  - Main thread: Streamlit UI (refreshes at DASHBOARD_REFRESH_MS)
-  - Background thread: Sensor → Feature → Classify → Map → Audio loop (20 Hz)
-  - SharedState: Thread-safe ring buffer for data exchange
-"""
-
-import sys
-import os
-import time
-import threading
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-
+"""Run with: .venv/bin/streamlit run app.py"""
 import streamlit as st
-import numpy as np
+from src.core.runtime import Monitor
+from src.core.classifier import DetectionProfile
+from src.io.simulator import SCENARIOS
+from src.io.serial_reader import list_available_ports
 
-from src.io.sensor_manager import SensorManager
-from src.core.feature_extraction import FeatureExtractor
-from src.core.classifier import StateClassifier
-from src.core.mapping import compute_audio_params
-from src.audio.tone_engine import ToneEngine
-from src.audio.voice_engine import VoiceEngine
-from src.ui.charts import plot_fft, plot_spectrogram, plot_radar, plot_time_series, plot_waveform
-from shared_state.ringbuffer import SharedState
-from src.config.settings import DASHBOARD_REFRESH_MS, SAMPLE_RATE
-
-
-def processing_loop(shared_state, sensor_manager, feature_extractor,
-                     classifier, tone_engine, voice_engine):
-    """Background thread: continuous sensor → audio pipeline."""
-    prev_state = "stable"
-    while True:
-        sensor_data = sensor_manager.read()
-        features = feature_extractor.update(sensor_data)
-        classification = classifier.classify(features)
-        audio_params = compute_audio_params(features, classification["state"])
-
-        # Update tone engine
-        tone_engine.update_params(audio_params)
-
-        # Voice announcements on state change
-        if classification["changed"]:
-            voice_engine.announce_transition(prev_state, classification["state"], features)
-            prev_state = classification["state"]
-
-        # Update shared state
-        shared_state.update(sensor_data, features, classification["state"])
-
-        # Update spectrogram from audio engine waveform
-        waveform = tone_engine.get_waveform()
-        shared_state.update_waveform(waveform)
-        shared_state.update_spectrogram(waveform)
-
-        time.sleep(1.0 / 20.0)  # 20 Hz processing rate
-
+@st.cache_resource
+def monitor():
+    return Monitor()
 
 def main():
-    st.set_page_config(page_title="Chemical-to-Audio Monitoring", page_icon="🧪", layout="wide")
+    st.set_page_config(page_title='Chemical-to-Audio Monitor',page_icon='🧪',layout='wide')
+    service = monitor()
+    st.title('Chemical-to-Audio Monitor')
+    st.caption('Continuous pH + temperature monitoring. Audio plays on the computer running this app.')
+    with st.sidebar:
+        st.header('Monitoring')
+        mode = st.selectbox('Source',['simulation','hardware'],disabled=service.running)
+        scenario, port, calibration_id = 'Full demo', '', ''
+        if mode == 'simulation':
+            scenario = st.selectbox('Simulated readings',SCENARIOS,disabled=service.running)
+            st.info('SIMULATED data — full demo repeats every 60 seconds.')
+        else:
+            try: ports = list_available_ports()
+            except Exception: ports = []
+            st.caption('Detected ports: '+(', '.join(ports) or 'none'))
+            port = st.text_input('Serial port',value=ports[0] if ports else '',disabled=service.running)
+            calibration_id = st.text_input('Completed calibration record ID',disabled=service.running,
+                                          help='Use the dated record from your two-point calibration and reference checks.')
+        audio = st.checkbox('Enable sound',value=False,disabled=service.running)
+        st.caption('Stop before changing settings. Controls are shared by browser sessions.')
+        with st.expander('Demo detection limits'):
+            st.warning('Demo values only. Set limits for your actual experiment before use.')
+            low = st.number_input('Minimum pH',0.,14.,4.,disabled=service.running)
+            high = st.number_input('Maximum pH',0.,14.,10.,disabled=service.running)
+            hot = st.number_input('Maximum temperature °C',5.,60.,40.,disabled=service.running)
+        if st.button('Start',disabled=service.running):
+            try:
+                service.start(mode,port,scenario,audio,DetectionProfile(low,high,hot),calibration_id)
+                st.rerun()
+            except Exception as exc: st.error(str(exc))
+        if st.button('Stop',disabled=not service.running):
+            service.stop()
+            st.rerun()
+    render_status(service)
 
-    # Initialize components (once)
-    if "initialized" not in st.session_state:
-        st.session_state.shared_state = SharedState()
-        st.session_state.sensor_manager = SensorManager()
-        st.session_state.feature_extractor = FeatureExtractor()
-        st.session_state.classifier = StateClassifier()
-        st.session_state.tone_engine = ToneEngine()
-        st.session_state.voice_engine = VoiceEngine()
-        st.session_state.initialized = True
+@st.fragment(run_every=0.5)
+def render_status(service):
+    current, history = service.snapshot()
+    st.subheader(current['state'].upper())
+    st.write(current['reason'])
+    st.caption('Source: '+current.get('mode','not running'))
+    if current['state'] == 'fault': st.error('Measurement fault. Check wiring/port; use Stop then Start to reconnect.')
+    if service.audio.error: st.error('Audio output: '+service.audio.error)
+    sample = current.get('sample',{})
+    valid = sample.get('valid',False)
+    a,b = st.columns(2)
+    a.metric('pH',f"{sample['ph']:.2f}" if valid else '—')
+    b.metric('Temperature',f"{sample['temperature']:.2f} °C" if valid else '—')
+    rows = [dict(seconds=r['sample']['timestamp'],pH=r['sample']['ph'],temperature=r['sample']['temperature'])
+            for r in history if r.get('sample',{}).get('valid')]
+    if rows:
+        a,b = st.columns(2)
+        a.line_chart(rows,x='seconds',y='pH')
+        b.line_chart(rows,x='seconds',y='temperature')
+    if history:
+        st.dataframe([dict(time=r['received_at'],state=r['state'],reason=r['reason']) for r in history[-10:]],hide_index=True)
+    if service.log_path:
+        st.caption('Recording: '+str(service.log_path))
+        if not service.running and service.log_path.exists():
+            st.download_button('Download recording',service.log_path.read_bytes(),file_name=service.log_path.name)
 
-        # Start background processing thread
-        proc_thread = threading.Thread(
-            target=processing_loop,
-            args=(
-                st.session_state.shared_state,
-                st.session_state.sensor_manager,
-                st.session_state.feature_extractor,
-                st.session_state.classifier,
-                st.session_state.tone_engine,
-                st.session_state.voice_engine
-            ),
-            daemon=True
-        )
-        proc_thread.start()
-
-        # Start audio
-        st.session_state.tone_engine.start()
-        st.session_state.voice_engine.start()
-
-    shared_state = st.session_state.shared_state
-    sensor_manager = st.session_state.sensor_manager
-    tone_engine = st.session_state.tone_engine
-
-    # Sidebar controls
-    st.sidebar.title("Controls")
-    if st.sidebar.button("Inject Disturbance"):
-        sensor_manager.inject_disturbance()
-
-    if st.sidebar.button("Reset Simulator"):
-        sensor_manager.reset()
-
-    # Main dashboard
-    st.title("🧪 Chemical-to-Audio Intelligent Monitoring System")
-
-    # Current status
-    current = shared_state.get_current()
-    state = current["state"]
-    features = current["features"]
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("State", state.upper())
-    col2.metric("pH", f"{features.get('ph_value', 0):.2f}")
-    col3.metric("Temperature", f"{features.get('temp_value', 0):.1f}°C")
-
-    # Charts row 1: Time series + Radar
-    history = shared_state.get_history()
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.plotly_chart(plot_time_series(history["ph"], history["temp"], history["state"]), use_container_width=True)
-    with col2:
-        st.plotly_chart(plot_radar(features), use_container_width=True)
-
-    # Charts row 2: FFT + Spectrogram + Waveform
-    waveform = shared_state.get_waveform()
-    spectrogram = shared_state.get_spectrogram()
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.plotly_chart(plot_fft(waveform, SAMPLE_RATE), use_container_width=True)
-    with col2:
-        st.plotly_chart(plot_spectrogram(spectrogram), use_container_width=True)
-    with col3:
-        st.plotly_chart(plot_waveform(waveform), use_container_width=True)
-
-    # Auto-refresh
-    time.sleep(DASHBOARD_REFRESH_MS / 1000.0)
-    st.rerun()
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__': main()

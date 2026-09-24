@@ -23,7 +23,7 @@ def ph_to_frequency(ph: float) -> float:
     """
     Exponential mapping: pH → Hz
     Grounded in equal-temperament: each pH unit = one semitone.
-    pH 7 (neutral) = 528 Hz (perceived as calm/stable).
+    pH 7 maps to 528 Hz as a design choice, not a health or stability claim.
     """
     # Center at pH 7 = 528 Hz, ±1 semitone per pH unit
     semitones_from_neutral = (ph - 7.0)
@@ -46,13 +46,13 @@ def state_to_harmonics(state: str) -> list:
 
 def temp_to_rhythm_density(temp: float) -> float:
     """Temperature → beats per second (rhythm density)."""
-    t_norm = (temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)
+    t_norm = float(np.clip((temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN), 0, 1))
     return TEMP_BPM_MIN + t_norm * (TEMP_BPM_MAX - TEMP_BPM_MIN)
 
 
 def temp_to_lfo_rate(temp: float) -> float:
     """Temperature → LFO modulation rate (0.1 to 8 Hz)."""
-    t_norm = (temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN)
+    t_norm = float(np.clip((temp - TEMP_MIN) / (TEMP_MAX - TEMP_MIN), 0, 1))
     return 0.1 + t_norm * 7.9
 
 

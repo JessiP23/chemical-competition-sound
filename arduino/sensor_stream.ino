@@ -1,139 +1,86 @@
-/*
- * sensor_stream.ino
- *
- * Arduino firmware for Chemical-to-Audio Intelligent Monitoring System.
- * Reads pH, temperature, and color sensors; streams via serial (CSV).
- *
- * Hardware:
- *   - pH sensor (analog A0)
- *   - DS18B20 temperature sensor (digital D2)
- *   - TCS34725 RGB color sensor (I2C - optional)
- *
- * Output format (CSV): pH,temperature,colorR,colorG,colorB
- * Update rate: 10 Hz (100ms)
+/* Uno R3 + SEN0161-V2 (A0) + DS18B20 (D2, 4.7k to 5V).
+ * Libraries: OneWire, DallasTemperature. Serial: 115200, newline.
+ * Protocol: CHEM1,sequence,millis,pH,tempC,rawADC,status
+ * Calibration in Serial Monitor: CAL7, CAL4, SAVE (each newline).
+ * Calibration is a two-point voltage fit at the calibration temperature.
+ * No claim of automatic temperature compensation: verify at experiment temperature.
  */
-
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <EEPROM.h>
+#include <math.h>
 
-// Pin definitions
-#define PH_PIN A0
-#define TEMP_PIN 2
+OneWire wire(2);
+DallasTemperature thermometer(&wire);
+struct Calibration { unsigned long magic; float adc7; float adc4; } calibration;
+const unsigned long MAGIC = 0x43484D31UL;
+float point7 = 0, point4 = 0;
+bool have7 = false, have4 = false;
+unsigned long sequence = 0, lastSample = 0;
+float raw = 0, temperature = 0;
+bool haveSample = false;
+char command[12];
+byte commandLength = 0;
+bool commandOverflow = false;
 
-// pH calibration offset (adjust after calibration)
-#define PH_OFFSET 0.0
-
-// Temperature sensor
-OneWire oneWire(TEMP_PIN);
-DallasTemperature tempSensor(&oneWire);
-
-// Timing
-unsigned long lastUpdate = 0;
-const unsigned long UPDATE_INTERVAL = 100;  // 10 Hz
-
-// pH smoothing window
-const int SMOOTH_WINDOW = 5;
-float phBuffer[SMOOTH_WINDOW];
-int phIndex = 0;
+bool calibrated() {
+  return calibration.magic == MAGIC && isfinite(calibration.adc7) && isfinite(calibration.adc4)
+    && calibration.adc7 > 1 && calibration.adc4 < 1022
+    && calibration.adc4 - calibration.adc7 > 10;
+}
 
 void setup() {
   Serial.begin(115200);
-  
-  tempSensor.begin();
-  tempSensor.setResolution(10);  // 0.25°C resolution
-  
-  // Initialize pH buffer
-  for (int i = 0; i < SMOOTH_WINDOW; i++) {
-    phBuffer[i] = 7.0;
+  thermometer.begin();
+  thermometer.setResolution(10);
+  EEPROM.get(0, calibration);
+  Serial.println(F("# CHEM1 READY; calibrate CAL7, CAL4, SAVE"));
+}
+
+void handleCommand() {
+  if (!haveSample || temperature < 5 || temperature > 60 || raw <= 1 || raw >= 1022) {
+    Serial.println(F("# Calibration rejected: check sensors"));
+    return;
   }
-  
-  delay(2000);  // Sensor stabilization
-  Serial.println("SENSOR_STREAM_READY");
+  if (!strcmp(command,"CAL7")) { point7=raw; have7=true; Serial.println(F("# pH7 point captured")); }
+  else if (!strcmp(command,"CAL4")) { point4=raw; have4=true; Serial.println(F("# pH4 point captured")); }
+  else if (!strcmp(command,"SAVE")) {
+    if (have7 && have4 && point4-point7>10) {
+      calibration.magic=MAGIC; calibration.adc7=point7; calibration.adc4=point4;
+      EEPROM.put(0,calibration);
+      have7=have4=false;
+      Serial.println(F("# Calibration saved; verify with independent reference"));
+    } else Serial.println(F("# Capture both stable buffer points before SAVE"));
+  } else Serial.println(F("# Unknown command; use CAL7, CAL4, SAVE"));
 }
 
 void loop() {
-  unsigned long now = millis();
-  
-  if (now - lastUpdate >= UPDATE_INTERVAL) {
-    lastUpdate = now;
-    
-    float ph = readPH();
-    float temp = readTemperature();
-    
-    // Color sensors (optional - return 0 if not connected)
-    float r = 0, g = 0, b = 0;
-    // readColor(&r, &g, &b);  // Uncomment if TCS34725 is connected
-    
-    // CSV output
-    Serial.print(ph, 2);
-    Serial.print(",");
-    Serial.print(temp, 2);
-    Serial.print(",");
-    Serial.print(r, 0);
-    Serial.print(",");
-    Serial.print(g, 0);
-    Serial.print(",");
-    Serial.println(b, 0);
+  if (millis()-lastSample >= 500 || !haveSample) {
+    thermometer.requestTemperatures(); // 10-bit conversion, up to 187.5 ms
+    temperature=thermometer.getTempCByIndex(0);
+    long sum=0;
+    for (byte i=0;i<10;i++) sum+=analogRead(A0);
+    raw=sum/10.0;
+    lastSample=millis();
+    haveSample=true;
+    float ph=calibrated() ? 7.0+(raw-calibration.adc7)*(-3.0)/(calibration.adc4-calibration.adc7) : 0;
+    const char* status="OK";
+    if (!calibrated()) status="UNCALIBRATED";
+    if (raw<=1 || raw>=1022 || ph<0 || ph>14) status="PH_FAULT";
+    if (temperature<5 || temperature>60) status="TEMP_FAULT";
+    Serial.print(F("CHEM1,")); Serial.print(sequence++); Serial.print(',');
+    Serial.print(lastSample); Serial.print(','); Serial.print(ph,3); Serial.print(',');
+    Serial.print(temperature,3); Serial.print(','); Serial.print((int)raw); Serial.print(',');
+    Serial.println(status);
+  }
+  while (Serial.available()) {
+    char c=Serial.read();
+    if(c=='\r') continue;
+    if(c=='\n') {
+      command[commandLength]='\0';
+      if(commandLength && !commandOverflow) handleCommand();
+      commandLength=0; commandOverflow=false;
+    } else if(commandLength<sizeof(command)-1) command[commandLength++]=c;
+    else commandOverflow=true;
   }
 }
-
-float readPH() {
-  int raw = analogRead(PH_PIN);
-  float voltage = raw * (5.0 / 1023.0);
-  
-  // DFRobot pH sensor approximation
-  float ph = 7.0 - (voltage - 2.5) / 0.18 + PH_OFFSET;
-  
-  // Moving average smoothing
-  phBuffer[phIndex] = ph;
-  phIndex = (phIndex + 1) % SMOOTH_WINDOW;
-  
-  float sum = 0.0;
-  for (int i = 0; i < SMOOTH_WINDOW; i++) {
-    sum += phBuffer[i];
-  }
-  float smoothed = sum / SMOOTH_WINDOW;
-  
-  // Clamp
-  if (smoothed < 0.0) smoothed = 0.0;
-  if (smoothed > 14.0) smoothed = 14.0;
-  
-  return smoothed;
-}
-
-float readTemperature() {
-  tempSensor.requestTemperatures();
-  float tempC = tempSensor.getTempCByIndex(0);
-  
-  if (tempC == -127.0) {
-    return 25.0;  // Fallback on error
-  }
-  return tempC;
-}
-
-/*
- * Optional TCS34725 color sensor support.
- * Requires Adafruit_TCS34725 library.
- */
-/*
-#include <Wire.h>
-#include <Adafruit_TCS34725.h>
-
-Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
-
-void initColor() {
-  if (tcs.begin()) {
-    Serial.println("Color sensor initialized");
-  } else {
-    Serial.println("No color sensor found");
-  }
-}
-
-void readColor(float *r, float *g, float *b) {
-  uint16_t red, green, blue, clear;
-  tcs.getRawData(&red, &green, &blue, &clear);
-  *r = (float)red;
-  *g = (float)green;
-  *b = (float)blue;
-}
-*/

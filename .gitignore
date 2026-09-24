@@ -103,3 +103,7 @@ htmlcov/
 .fossa.yaml.lock.yaml.lock.yml.lock.yml
 .fossa.yml.lock.yml.lock.yml.lock.yml
 .fossa.yaml.lock.yml.lock.yml.lock.yml
+
+# Local monitoring sessions
+recordings/
+.venv/
